@@ -131,6 +131,42 @@ func postClose(hwnd uintptr) {
 	_, _, _ = procPostMessageW.Call(hwnd, wmClose, 0, 0)
 }
 
+// ---- DWM 标题栏颜色 ----
+
+var dwmapi = windows.NewLazySystemDLL("dwmapi.dll")
+
+var procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+
+const (
+	dwmwaUseImmersiveDarkMode = 20
+	dwmwaBorderColor          = 34
+	dwmwaCaptionColor         = 35
+	dwmwaTextColor            = 36
+)
+
+// setCaptionColor 把标题栏/边框染成指定颜色(Win11),文本色按亮度选黑白;
+// 不支持时(Win10)退回沉浸式深色标题栏
+func setCaptionColor(hwnd uintptr, r, g, b uint8) {
+	colorref := uint32(r) | uint32(g)<<8 | uint32(b)<<16
+	ret, _, _ := procDwmSetWindowAttribute.Call(
+		hwnd, dwmwaCaptionColor, uintptr(unsafe.Pointer(&colorref)), 4)
+	if ret != 0 {
+		v := uint32(1)
+		_, _, _ = procDwmSetWindowAttribute.Call(
+			hwnd, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&v)), 4)
+		return
+	}
+	lum := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
+	textColor := uint32(0xFFFFFF)
+	if lum > 140 {
+		textColor = 0
+	}
+	_, _, _ = procDwmSetWindowAttribute.Call(
+		hwnd, dwmwaTextColor, uintptr(unsafe.Pointer(&textColor)), 4)
+	_, _, _ = procDwmSetWindowAttribute.Call(
+		hwnd, dwmwaBorderColor, uintptr(unsafe.Pointer(&colorref)), 4)
+}
+
 // ---- 任务栏闪烁 ----
 
 const flashwAll = 0x3 // FLASHW_CAPTION | FLASHW_TRAY

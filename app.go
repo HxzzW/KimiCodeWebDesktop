@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -31,9 +33,10 @@ type app struct {
 	hwnd      uintptr
 	animating atomic.Int32
 
-	baseIconICO   []byte
-	spinnerFrames [][]byte
-	lastRectSave  time.Time
+	baseIconICO      []byte
+	spinnerFrames    [][]byte
+	lastRectSave     time.Time
+	lastCaptionColor string
 }
 
 func newApp(kimi string) *app {
@@ -248,6 +251,39 @@ func (a *app) showMainWindow() {
 	setForeground(a.hwnd)
 }
 
+// ---- 标题栏与页面同色 ----
+
+var colorNumRe = regexp.MustCompile(`\d+`)
+
+// applyPageColor 解析 getComputedStyle 的 rgb/rgba 字符串并染标题栏
+func (a *app) applyPageColor(c string) {
+	if c == a.lastCaptionColor {
+		return
+	}
+	nums := colorNumRe.FindAllString(c, 4)
+	if len(nums) < 3 {
+		return
+	}
+	r, _ := strconv.Atoi(nums[0])
+	g, _ := strconv.Atoi(nums[1])
+	b, _ := strconv.Atoi(nums[2])
+	a.lastCaptionColor = c
+	setCaptionColor(a.hwnd, uint8(r), uint8(g), uint8(b))
+}
+
+// captionColorLoop 定期从页面取顶部背景色,同步到标题栏
+func (a *app) captionColorLoop() {
+	const probe = `(function(){try{` +
+		`var el=document.elementFromPoint(Math.floor(innerWidth/2),4);` +
+		`var c=el?getComputedStyle(el).backgroundColor:'';` +
+		`if(!c||c==='rgba(0, 0, 0, 0)'||c==='transparent'){c=getComputedStyle(document.body).backgroundColor;}` +
+		`window.__reportBg(c);}catch(e){}})()`
+	for quitting.Load() == 0 {
+		a.w.Dispatch(func() { a.w.Eval(probe) })
+		time.Sleep(3 * time.Second)
+	}
+}
+
 // ---- 窗口位置记忆 ----
 
 // saveWindowRect 拖动/缩放/最大化及正常退出时保存窗口几何。
@@ -342,12 +378,15 @@ func (a *app) run() int {
 			showWindow(a.hwnd, swMaximize)
 		}
 	}
+	// 页面背景色 -> 标题栏同色,消除分割感(主题切换自动跟随)
+	_ = a.w.Bind("__reportBg", func(c string) { a.applyPageColor(c) })
 	a.w.Navigate(a.buildURL())
 
 	a.setupTray()
 	go a.watchdog()
 	go a.activityMonitor()
 	go a.animateLoop()
+	go a.captionColorLoop()
 
 	a.w.Run() // 阻塞,直到窗口真正关闭
 
