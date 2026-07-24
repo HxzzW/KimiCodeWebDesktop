@@ -32,6 +32,7 @@ type app struct {
 
 	baseIconICO   []byte
 	spinnerFrames [][]byte
+	lastRectSave  time.Time
 }
 
 func newApp(kimi string) *app {
@@ -203,6 +204,45 @@ func (a *app) showMainWindow() {
 	setForeground(a.hwnd)
 }
 
+// ---- 窗口位置记忆 ----
+
+// saveWindowRect 拖动/缩放/最大化及正常退出时保存窗口几何。
+// 用 GetWindowPlacement:最大化/最小化时存的也是正确的还原矩形
+func (a *app) saveWindowRect() {
+	if time.Since(a.lastRectSave) < time.Second {
+		return // WM_SIZE 在拖动期间连续触发,防抖
+	}
+	a.lastRectSave = time.Now()
+	showCmd, x, y, w, h, ok := getWindowPlacement(a.hwnd)
+	if !ok {
+		return
+	}
+	s := loadState()
+	s["win_x"], s["win_y"], s["win_w"], s["win_h"] =
+		float64(x), float64(y), float64(w), float64(h)
+	s["win_max"] = showCmd == swMaximize
+	saveState(s)
+}
+
+// loadWindowRect 读取保存的窗口几何;掉出虚拟屏(如显示器变更)则放弃恢复
+func loadWindowRect() (x, y, w, h int, maxed, ok bool) {
+	s := loadState()
+	fx, xok := s["win_x"].(float64)
+	fy, yok := s["win_y"].(float64)
+	fw, wok := s["win_w"].(float64)
+	fh, hok := s["win_h"].(float64)
+	if !(xok && yok && wok && hok) || fw < 200 || fh < 200 {
+		return 0, 0, 0, 0, false, false
+	}
+	x, y, w, h = int(fx), int(fy), int(fw), int(fh)
+	vx, vy, vw, vh := virtualScreenBounds()
+	if x+w < vx || y+h < vy || x > vx+vw || y > vy+vh {
+		return 0, 0, 0, 0, false, false
+	}
+	maxed, _ = s["win_max"].(bool)
+	return x, y, w, h, maxed, true
+}
+
 // toggleVis 启动/停止 kimi vis 会话可视化器
 func (a *app) toggleVis() {
 	if a.visCmd != nil && a.visCmd.Process != nil && pidAlive(a.visCmd.Process.Pid) {
@@ -251,7 +291,13 @@ func (a *app) run() int {
 	}
 	defer a.w.Destroy()
 	a.hwnd = uintptr(a.w.Window())
-	subclassForCloseHide(a.hwnd, &quitting)
+	subclassForCloseHide(a.hwnd, &quitting, a.saveWindowRect)
+	if x, y, w, h, maxed, ok := loadWindowRect(); ok {
+		setWindowRect(a.hwnd, x, y, w, h) // 恢复上次的窗口位置与大小
+		if maxed {
+			showWindow(a.hwnd, swMaximize)
+		}
+	}
 	a.w.Navigate(a.buildURL())
 
 	a.setupTray()
@@ -262,6 +308,8 @@ func (a *app) run() int {
 	a.w.Run() // 阻塞,直到窗口真正关闭
 
 	// 清理
+	a.lastRectSave = time.Time{} // 退出保存绕过防抖
+	a.saveWindowRect()
 	a.stopService()
 	if a.visCmd != nil && a.visCmd.Process != nil && pidAlive(a.visCmd.Process.Pid) {
 		_ = a.visCmd.Process.Kill()

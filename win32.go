@@ -37,6 +37,11 @@ var (
 	procCallWindowProcW    = user32.NewProc("CallWindowProcW")
 	procSetProcessDPIAware = user32.NewProc("SetProcessDPIAware")
 	procPostMessageW       = user32.NewProc("PostMessageW")
+	procGetWindowRect      = user32.NewProc("GetWindowRect")
+	procGetWindowPlacement = user32.NewProc("GetWindowPlacement")
+	procSetWindowPos       = user32.NewProc("SetWindowPos")
+	procIsIconic           = user32.NewProc("IsIconic")
+	procGetSystemMetrics   = user32.NewProc("GetSystemMetrics")
 	procCreateMutexW       = kernel32.NewProc("CreateMutexW")
 	procPlaySoundW         = winmm.NewProc("PlaySoundW")
 )
@@ -125,19 +130,71 @@ func postClose(hwnd uintptr) {
 	_, _, _ = procPostMessageW.Call(hwnd, wmClose, 0, 0)
 }
 
+// ---- 窗口几何 ----
+
+type winRect struct{ Left, Top, Right, Bottom int32 }
+
+// windowPlacement 对应 WINDOWPLACEMENT 结构
+type windowPlacement struct {
+	Length, Flags, ShowCmd uint32
+	PtMin, PtMax           [2]int32
+	RcNormal               winRect
+}
+
+const swMaximize = 3
+
+// getWindowPlacement 返回 showCmd 与正常状态(还原时)的窗口矩形,
+// 最大化/最小化时也能拿到正确的还原矩形
+func getWindowPlacement(hwnd uintptr) (showCmd, x, y, w, h int, ok bool) {
+	var wp windowPlacement
+	wp.Length = uint32(unsafe.Sizeof(wp))
+	ret, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
+	if ret == 0 {
+		return 0, 0, 0, 0, 0, false
+	}
+	r := wp.RcNormal
+	return int(wp.ShowCmd), int(r.Left), int(r.Top), int(r.Right - r.Left), int(r.Bottom - r.Top), true
+}
+
+func setWindowRect(hwnd uintptr, x, y, w, h int) {
+	const swpNoZOrder = 0x4
+	_, _, _ = procSetWindowPos.Call(hwnd, 0,
+		uintptr(x), uintptr(y), uintptr(w), uintptr(h), swpNoZOrder)
+}
+
+// virtualScreenBounds 所有显示器的联合区域(用于校验恢复的位置没掉出屏幕)
+func virtualScreenBounds() (x, y, w, h int) {
+	vx, _, _ := procGetSystemMetrics.Call(76) // SM_XVIRTUALSCREEN
+	vy, _, _ := procGetSystemMetrics.Call(77) // SM_YVIRTUALSCREEN
+	vw, _, _ := procGetSystemMetrics.Call(78) // SM_CXVIRTUALSCREEN
+	vh, _, _ := procGetSystemMetrics.Call(79) // SM_CYVIRTUALSCREEN
+	return int(vx), int(vy), int(vw), int(vh)
+}
+
 // ---- 关窗拦截(关窗改为隐藏到托盘) ----
 
-const gwlpWndProc = -4
+const (
+	gwlpWndProc    = -4
+	wmExitSizeMove = 0x0232
+	wmSize         = 0x0005
+)
 
 var oldWndProc uintptr
 
 // subclassForCloseHide 子类化窗口过程:拦截 WM_CLOSE,平时隐藏,
-// quitting 置位后才走原流程真正关闭
-func subclassForCloseHide(hwnd uintptr, quitting *atomic.Int32) {
+// quitting 置位后才走原流程真正关闭;拖动/缩放/最大化结束时回调 onSizeMoveEnd
+func subclassForCloseHide(hwnd uintptr, quitting *atomic.Int32, onSizeMoveEnd func()) {
 	cb := syscall.NewCallback(func(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
-		if msg == wmClose && quitting.Load() == 0 {
-			showWindow(hwnd, swHide)
-			return 0
+		switch msg {
+		case wmClose:
+			if quitting.Load() == 0 {
+				showWindow(hwnd, swHide)
+				return 0
+			}
+		case wmExitSizeMove, wmSize:
+			if onSizeMoveEnd != nil {
+				onSizeMoveEnd()
+			}
 		}
 		r, _, _ := procCallWindowProcW.Call(oldWndProc, hwnd, uintptr(msg), wp, lp)
 		return r
