@@ -1,0 +1,10 @@
+{
+  "StringFileInfo": {
+    "FileDescription": "Kimi Web Desktop",
+    "ProductName": "KimiCodeWebDesktop",
+    "FileVersion": "1.0.0.0",
+    "ProductVersion": "1.0.0.0",
+    "LegalCopyright": "HxzzW"
+  },
+  "IconPath": "kimi.ico"
+}

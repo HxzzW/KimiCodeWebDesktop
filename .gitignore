@@ -1,10 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
+# 编译产物
+kimiweb.exe
+rsrc.syso
 
-# 虚拟环境
-.venv/
-
-# PyInstaller 产物
-build/
-dist/
+# Go 便携工具链与缓存(项目内,无需系统安装)
+.toolchain/
+.gopath/
+.gomodcache/
+.gocache/
