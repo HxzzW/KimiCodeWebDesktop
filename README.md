@@ -2,17 +2,19 @@
 
 [Kimi Code CLI](https://www.kimi.com/code/docs/en/) 的 Web UI(`kimi web`)Windows 桌面启动器:双击即用,以内嵌 WebView2 窗口打开 Web UI,系统托盘常驻。
 
+Go 实现,单文件约 9 MB、无控制台窗口、无 CGO/运行时依赖(WebView2Loader 已内嵌)。
+
 ## 功能
 
 - **一键启动**:自动拉起隐藏的 `kimi web --no-open` 子进程(或复用已在运行的实例),服务就绪后打开桌面窗口
-- **系统托盘**:关闭窗口只是隐藏到托盘,服务继续运行;托盘菜单提供 显示窗口 / 会话可视化(`kimi vis`) / 轮换 Token / 检查更新 / 重启服务 / 退出
+- **系统托盘**:关闭窗口只是隐藏到托盘,服务继续运行;托盘菜单提供 显示窗口 / 会话可视化(`kimi vis`) / 轮换 Token / 检查更新 / 重启服务 / 通知设置 / 退出
 - **状态记忆**:固定端口 + 持久化 WebView2 数据目录,页面引导、登录状态等 localStorage 内容跨启动保留
-- **复制粘贴可用**:开启了文本选择、右键菜单和 Ctrl+C/V 等快捷键(不开 DevTools)
+- **复制粘贴可用**:WebView2 默认开启文本选择、右键菜单与快捷键
 - **更新检测**:启动时对比本地 `kimi --version` 与 npm 上的最新版(24 小时内最多查一次,支持国内镜像),发现新版本时询问是否升级,可跳过特定版本
 - **崩溃守护**:服务进程意外退出时弹窗询问是否重启;启动失败自动附 `kimi doctor` 诊断到日志
-- **工作状态动画**:Kimi Code 工作时,窗口标题显示转轮动画、托盘图标带环绕圆点;忙完发 Windows 通知,有会话等待审批/提问时也会提醒(托盘"通知设置"里可分别开关动画/通知/提示音)
+- **工作状态动画**:Kimi Code 工作时,窗口标题显示与浏览器一致的 ◐◓◑◒ 转轮动画、托盘图标带环绕圆点;忙完发 Windows 通知,有会话等待审批/提问时也会提醒(托盘"通知设置"里可分别开关动画/通知/提示音)
 - **单实例保护**:重复双击只会提示"已在运行"
-- **Kimi 图标**:exe 与托盘均内嵌官方图标
+- **Kimi 图标**:exe、窗口、托盘均为官方图标
 
 ## 环境要求
 
@@ -21,7 +23,7 @@
 
 ## 使用
 
-直接运行打包好的 `dist/KimiWeb.exe`(或自行打包,见下)。
+直接运行 `kimiweb.exe`(或按下方说明自行编译)。
 
 - **关闭窗口** = 隐藏到托盘,服务不停;**退出** 请用托盘菜单(退出时会停止本程序拉起的服务;复用的实例不受影响)
 - 创建桌面快捷方式:
@@ -30,41 +32,44 @@
 .\make-shortcut.ps1
 ```
 
-## 自行打包
+## 自行编译
+
+无需系统安装 Go:下载 [go1.26+ windows-amd64 zip](https://golang.google.cn/dl/) 解压到项目内 `.toolchain/` 即可。
 
 ```sh
-python -m venv .venv
-.venv/Scripts/pip install pywebview pyinstaller pystray pillow
-.venv/Scripts/python -m PyInstaller KimiWeb.spec --noconfirm
+go mod download
+go run github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest -o rsrc.syso versioninfo.json
+CGO_ENABLED=0 go build -ldflags="-s -w -H windowsgui" -o kimiweb.exe .
 ```
-
-产物在 `dist/KimiWeb.exe`(单文件、无控制台窗口)。
 
 ## 项目结构
 
 ```
-app.py              瘦入口(PyInstaller 目标)
-kimiweb/
-  config.py         全局常量与 state.json 存取
-  utils.py          定位 kimi / 读取 token / 资源路径
-  winapi.py         Windows 原语:消息框、pid 存活、单实例锁、WebView2 检测
-  updater.py        CLI 版本检测与升级
-  server.py         kimi web 服务的发现、拉起、就绪等待、kimi doctor
-  webview_ext.py    pywebview 补丁与统一启动参数
-  app.py            KimiWebApp:服务、窗口、看门狗、托盘
-  __main__.py       main() 与全局异常入口
+main.go           入口与全局异常处理
+app.go            App:服务、窗口、看门狗、状态监视、动画
+tray.go           系统托盘与菜单
+config.go         常量与 state.json 存取
+kimi.go           kimi web 服务的发现、拉起、就绪等待、kimi doctor
+updater.go        CLI 版本检测与升级
+monitor.go        会话工作状态轮询
+win32.go          Windows 原语:消息框、互斥锁、窗口子类化、提示音等
+icon.go           内嵌图标与托盘动画帧生成
+notify.go         Windows 通知(go-toast)
+kimi.ico/kimi.png 图标资源(内嵌)
+versioninfo.json  exe 版本信息(goversioninfo)
 ```
 
 ## 工作原理
 
 - 启动时先检测更新,再查 kimi 的实例注册表 `~/.kimi-code/server/instances/`(校验 pid 存活 + `/openapi.json` 指纹):有活实例直接复用,否则挑一个空闲端口(优先 58627)拉起新实例
 - Web UI 通过 `http://127.0.0.1:<端口>/#token=<server.token>` 完成鉴权,token 读自 `~/.kimi-code/server.token`;托盘"轮换 Token"调用 `kimi web rotate-token` 并用新 token 重载页面
-- WebView2 数据目录固定在 `%LOCALAPPDATA%\KimiWeb`,关闭 pywebview 默认的隐私模式,localStorage 因此能持久保存
-- pywebview 默认只在 debug 模式开启右键菜单和快捷键,这里通过补丁强制开启(`AreDefaultContextMenusEnabled` / `AreBrowserAcceleratorKeysEnabled`)
-- 服务日志与状态文件在 `%LOCALAPPDATA%\KimiWeb\`(`kimi-web.log`、`state.json`),看门狗线程每 2 秒检查一次服务进程存活
-- 工作状态通过 `GET /api/v1/sessions` 轮询(`busy` / `main_turn_active` / `pending_interaction` 字段),忙时切换标题与托盘动画帧,忙完按需发通知(pystray 气球)或提示音(`winsound` 系统音)
+- WebView2 数据目录固定在 `%LOCALAPPDATA%\KimiWeb`,localStorage 因此能持久保存
+- 服务日志与状态文件在 `%LOCALAPPDATA%\KimiWeb\`(`kimi-web.log`、`state.json`),看门狗每 2 秒检查一次服务进程存活
+- 工作状态通过 `GET /api/v1/sessions` 轮询(`busy` / `main_turn_active` / `pending_interaction` 字段),忙时切换标题与托盘动画帧,忙完按需发 Windows toast 通知或提示音(系统音)
+- 关窗隐藏通过对窗口过程做子类化拦截 `WM_CLOSE` 实现;托盘"退出"才真正停止服务并关闭
 
 ## 说明
 
 - 升级检测源:npm registry 的 [`@moonshot-ai/kimi-code`](https://www.npmjs.com/package/@moonshot-ai/kimi-code)(备用 npmmirror);升级命令为官方 Windows 安装脚本 `irm https://code.kimi.com/kimi-code/install.ps1 | iex`
 - 窗口与已有浏览器标签页访问的是同一个本地服务,会话数据共享(同一 `~/.kimi-code` 家目录)
+- 主要依赖:[go-webview2](https://github.com/jchv/go-webview2)(WebView2 绑定)、[getlantern/systray](https://github.com/getlantern/systray)(托盘)、[go-toast](https://github.com/go-toast/toast)(通知)
