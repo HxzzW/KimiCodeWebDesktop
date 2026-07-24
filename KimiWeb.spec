@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[('C:\\Users\\hx\\miniforge3\\Library\\bin\\libcrypto-3-x64.dll', '.'), ('C:\\Users\\hx\\miniforge3\\Library\\bin\\libssl-3-x64.dll', '.')],
-    datas=[],
+    datas=[('kimi.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

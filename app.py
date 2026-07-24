@@ -2,13 +2,15 @@
 """Kimi Web 桌面启动器。
 
 启动 `kimi web --no-open` 作为隐藏子进程,等待本地服务就绪后,
-用内嵌浏览器(WebView2)窗口打开 Web UI;关闭窗口即停止服务。
+用内嵌浏览器(WebView2)窗口打开 Web UI。
 
-端口固定从 58627 起:先查 kimi 的实例注册表(~/.kimi-code/server/instances/),
-有活着的 kimi web 实例就直接复用,否则拉起新实例(端口被占时顺延)。
-同时关闭 pywebview 的隐私模式并使用固定数据目录:来源(origin)与
-localStorage 稳定,页面才能跨启动记住“引导已完成”等状态。
-启动前还会检测 Kimi Code CLI 更新(每 24 小时最多一次),由用户选择是否升级。
+- 端口固定从 58627 起:先查 kimi 的实例注册表(~/.kimi-code/server/instances/),
+  有活着的 kimi web 实例就直接复用,否则拉起新实例(端口被占时顺延)。
+- 关闭 pywebview 的隐私模式并使用固定数据目录:来源(origin)与
+  localStorage 稳定,页面才能跨启动记住“引导已完成”等状态。
+- 系统托盘常驻:关闭窗口只是隐藏到托盘,服务继续运行;
+  托盘菜单提供 显示窗口 / 会话可视化(kimi vis) / 轮换 Token / 检查更新 / 重启服务 / 退出。
+- 启动前检测 Kimi Code CLI 更新(每 24 小时最多一次),由用户选择是否升级。
 """
 
 import ctypes
@@ -19,12 +21,16 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import winreg
 from ctypes import wintypes
 
+import pystray
 import webview
+from PIL import Image
 
 APP_TITLE = "Kimi Web"
 PREFERRED_PORT = 58627  # kimi web 默认端口
@@ -47,6 +53,7 @@ NPM_LATEST_URLS = [
     "https://registry.npmmirror.com/@moonshot-ai/kimi-code/latest",
 ]
 UPGRADE_COMMAND = "irm https://code.kimi.com/kimi-code/install.ps1 | iex"
+WEBVIEW2_GUID = r"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 MB_YESNOCANCEL = 0x3
 MB_YESNO = 0x4
@@ -75,6 +82,12 @@ def read_token():
             return f.read().strip()
     except OSError:
         return ""
+
+
+def resource_path(name):
+    """兼容 PyInstaller 单文件运行时的资源定位。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 def load_state():
@@ -141,21 +154,26 @@ def message_box(text, flags):
     return ctypes.windll.user32.MessageBoxW(0, text, APP_TITLE, flags)
 
 
-def check_for_updates(kimi):
-    """启动前检测 Kimi Code CLI 更新(每 24h 最多一次,离线也计入,
-    避免每次启动都卡在超时上);有新版本时询问:升级 / 本次跳过 / 跳过此版本。"""
+def check_for_updates(kimi, force=False):
+    """检测 Kimi Code CLI 更新(每 24h 最多一次,离线也计入,避免每次启动
+    都卡在超时上;force 跳过间隔与跳过记录,并给出结果反馈)。
+    有新版本时询问:升级 / 本次跳过 / 跳过此版本。"""
     state = load_state()
-    if time.time() - state.get("last_check", 0) < CHECK_INTERVAL:
+    if not force and time.time() - state.get("last_check", 0) < CHECK_INTERVAL:
         return
     new = latest_version()
     state["last_check"] = time.time()
     save_state(state)
     if not new:
+        if force:
+            message_box("暂时无法检查更新:网络不可用。", MB_ICONWARNING)
         return
     cur = current_version(kimi)
     if not cur or _norm(new) <= _norm(cur):
+        if force:
+            message_box(f"已是最新版本 v{format_version(cur or new)}。", MB_ICONINFORMATION)
         return
-    if format_version(new) == state.get("skip_version"):
+    if not force and format_version(new) == state.get("skip_version"):
         return
     answer = message_box(
         f"检测到 Kimi Code CLI 新版本 v{format_version(new)}"
@@ -271,11 +289,48 @@ def wait_for_server(port, proc, timeout=STARTUP_TIMEOUT):
     return None
 
 
+def run_doctor(kimi):
+    """服务启动失败时运行 kimi doctor,把配置校验结果附加到日志。"""
+    try:
+        result = subprocess.run(
+            [kimi, "doctor"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+    except (OSError, subprocess.SubprocessError):
+        return
+    if output:
+        try:
+            os.makedirs(WEBVIEW_DATA_DIR, exist_ok=True)
+            with open(SERVER_LOG, "a", encoding="utf-8") as f:
+                f.write("\n--- kimi doctor ---\n" + output + "\n")
+        except OSError:
+            pass
+
+
+def webview2_runtime_available():
+    """通过注册表检测 WebView2 Runtime 是否安装。"""
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for scope in (r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients",
+                      r"SOFTWARE\Microsoft\EdgeUpdate\Clients"):
+            try:
+                with winreg.OpenKey(root, scope + "\\" + WEBVIEW2_GUID) as key:
+                    pv, _ = winreg.QueryValueEx(key, "pv")
+                    if pv and pv != "0.0.0.0":
+                        return True
+            except OSError:
+                continue
+    return False
+
+
 def ensure_single_instance():
     """单实例保护:已在运行时提示并退出,避免重复窗口和重复更新弹窗。"""
     ctypes.windll.kernel32.CreateMutexW(None, False, "KimiWebSingleton")
     if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
-        message_box("Kimi Web 已在运行,请使用已打开的窗口。", MB_ICONINFORMATION)
+        message_box("Kimi Web 已在运行,请使用已打开的窗口或托盘图标。", MB_ICONINFORMATION)
         return False
     return True
 
@@ -319,6 +374,198 @@ def show_error(message):
     start_webview()
 
 
+class KimiWebApp:
+    """管理 kimi web 服务、主窗口、看门狗与系统托盘。"""
+
+    def __init__(self, kimi):
+        self.kimi = kimi
+        self.proc = None  # 本进程拉起的 kimi web;复用别人实例时为 None
+        self.log = None
+        self.port = None
+        self.vis_proc = None
+        self.window = None
+        self.tray = None
+        self.quitting = threading.Event()
+
+    # ---- 服务管理 ----
+
+    def build_url(self):
+        url = f"http://127.0.0.1:{self.port}/"
+        token = read_token()
+        if token:
+            url += f"#token={token}"
+        return url
+
+    def _spawn(self, port):
+        os.makedirs(WEBVIEW_DATA_DIR, exist_ok=True)
+        if self.log is None or self.log.closed:
+            self.log = open(SERVER_LOG, "wb")  # 子进程输出留存,便于诊断
+        self.proc = subprocess.Popen(
+            [self.kimi, "web", "--no-open", "--port", str(port)],
+            stdout=self.log,
+            stderr=self.log,
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+    def start_service(self):
+        """复用或拉起 kimi web;成功返回端口,失败返回 None。"""
+        port = find_running_server()
+        if port is not None:
+            self.port = port
+            return port
+        port = pick_port()
+        self._spawn(port)
+        ready = wait_for_server(port, self.proc)
+        if ready is None:
+            self.proc.terminate()
+            return None
+        self.port = ready
+        return ready
+
+    def stop_service(self):
+        # 只停止本进程拉起的服务;复用的实例不动
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+
+    def restart_service(self):
+        self.stop_service()
+        if self.start_service() is None:
+            run_doctor(self.kimi)
+            message_box(f"服务重启失败。\n日志见: {SERVER_LOG}", MB_ICONWARNING)
+            return
+        self.window.load_url(self.build_url())
+
+    def watchdog(self):
+        """监视本进程拉起的服务,意外退出时询问是否重启。"""
+        while not self.quitting.wait(2):
+            if self.proc is None or self.proc.poll() is None:
+                continue
+            if self.quitting.is_set():
+                return
+            answer = message_box(
+                "kimi web 服务意外退出。\n\n是否重启服务?", MB_YESNO | MB_ICONWARNING
+            )
+            if answer == IDYES:
+                self.restart_service()
+            else:
+                return  # 用户不重启就不再监视
+
+    # ---- 窗口 ----
+
+    def create_window(self):
+        self.window = webview.create_window(
+            APP_TITLE,
+            self.build_url(),
+            width=1280,
+            height=840,
+            min_size=(800, 600),
+            text_select=True,
+        )
+        self.window.events.closing += self.on_closing
+        self.window.events.closed += self.on_closed
+
+    def on_closing(self):
+        # 返回 False 即取消关闭:平时关窗只是隐藏到托盘,
+        # 托盘“退出”置位 quitting 后才真正关闭
+        if self.quitting.is_set():
+            return
+        self.window.hide()
+        return False
+
+    def on_closed(self):
+        self.quitting.set()
+        self.stop_service()
+        if self.vis_proc is not None and self.vis_proc.poll() is None:
+            self.vis_proc.terminate()
+        if self.tray is not None:
+            self.tray.stop()
+        if self.log is not None and not self.log.closed:
+            self.log.close()
+
+    def show_window(self):
+        self.window.show()
+        self.window.restore()
+
+    # ---- 托盘 ----
+
+    def notify(self, message):
+        try:
+            if self.tray is not None:
+                self.tray.notify(message, APP_TITLE)
+        except Exception:
+            pass
+
+    def toggle_vis(self):
+        """启动/停止 kimi vis 会话可视化器。"""
+        if self.vis_proc is not None and self.vis_proc.poll() is None:
+            self.vis_proc.terminate()
+            self.notify("会话可视化已停止")
+            return
+        try:
+            self.vis_proc = subprocess.Popen(
+                [self.kimi, "vis"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            self.notify("会话可视化已启动,浏览器将自动打开")
+        except OSError as e:
+            message_box(f"kimi vis 启动失败: {e}", MB_ICONWARNING)
+
+    def rotate_token(self):
+        """轮换 web UI 的 bearer token,并用新 token 重载页面。"""
+        try:
+            result = subprocess.run(
+                [self.kimi, "web", "rotate-token"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            message_box(f"Token 轮换失败: {e}", MB_ICONWARNING)
+            return
+        if result.returncode == 0:
+            self.window.load_url(self.build_url())
+            self.notify("Token 已轮换,页面已用新令牌重新加载")
+        else:
+            message_box(f"Token 轮换失败: {result.stderr or result.stdout}", MB_ICONWARNING)
+
+    def quit(self):
+        if self.quitting.is_set():
+            return
+        self.quitting.set()
+        if self.tray is not None:
+            self.tray.stop()
+        if self.window is not None:
+            self.window.destroy()
+
+    def setup_tray(self):
+        image = Image.open(resource_path("kimi.ico"))
+        menu = pystray.Menu(
+            pystray.MenuItem("显示窗口", lambda icon, item: self.show_window(), default=True),
+            pystray.MenuItem("会话可视化", lambda icon, item: self.toggle_vis()),
+            pystray.MenuItem("轮换 Token", lambda icon, item: self.rotate_token()),
+            pystray.MenuItem("检查更新", lambda icon, item: check_for_updates(self.kimi, force=True)),
+            pystray.MenuItem("重启服务", lambda icon, item: self.restart_service()),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出", lambda icon, item: self.quit()),
+        )
+        self.tray = pystray.Icon("KimiWeb", image, APP_TITLE, menu)
+        threading.Thread(target=self.tray.run, daemon=True).start()
+
+    def run(self):
+        self.create_window()
+        self.setup_tray()
+        threading.Thread(target=self.watchdog, daemon=True).start()
+        start_webview()  # 阻塞,直到窗口真正关闭
+        return 0
+
+
 def main():
     patch_webview_settings()
     if not ensure_single_instance():
@@ -329,51 +576,24 @@ def main():
         show_error("未找到 kimi 命令,请先安装 Kimi Code CLI。")
         return 1
 
+    if not webview2_runtime_available():
+        message_box(
+            "未检测到 WebView2 运行时,本程序无法运行。\n\n"
+            "请从微软官网下载安装 WebView2 Runtime:\n"
+            "https://developer.microsoft.com/microsoft-edge/webview2/",
+            MB_ICONWARNING,
+        )
+        return 1
+
     check_for_updates(kimi)
 
-    proc = None
-    log = None
-    port = find_running_server()
-    if port is None:
-        port = pick_port()
-        os.makedirs(WEBVIEW_DATA_DIR, exist_ok=True)
-        log = open(SERVER_LOG, "wb")  # 子进程输出留存,便于诊断启动失败
-        proc = subprocess.Popen(
-            [kimi, "web", "--no-open", "--port", str(port)],
-            stdout=log,
-            stderr=log,
-            creationflags=CREATE_NO_WINDOW,
-        )
+    app = KimiWebApp(kimi)
+    if app.start_service() is None:
+        run_doctor(kimi)
+        show_error(f"kimi web 服务启动失败或超时。\n日志见: {SERVER_LOG}")
+        return 1
 
-        port = wait_for_server(port, proc)
-        if port is None:
-            proc.terminate()
-            show_error(f"kimi web 服务启动失败或超时。\n日志见: {SERVER_LOG}")
-            return 1
-
-    token = read_token()
-    url = f"http://127.0.0.1:{port}/"
-    if token:
-        url += f"#token={token}"
-
-    window = webview.create_window(
-        APP_TITLE, url, width=1280, height=840, min_size=(800, 600), text_select=True
-    )
-
-    def on_closed():
-        # 窗口关闭即停止 kimi web 服务(仅当服务是本进程拉起的)
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        if log is not None:
-            log.close()
-
-    window.events.closed += on_closed
-    start_webview()
-    return 0
+    return app.run()
 
 
 if __name__ == "__main__":
