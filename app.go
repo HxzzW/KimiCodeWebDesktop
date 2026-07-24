@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -122,43 +123,86 @@ func (a *app) watchdog() {
 	}
 }
 
-// activityMonitor 轮询会话工作状态:忙时开启动画,忙完发通知,等待交互时提醒
+// activityMonitor 轮询会话工作状态:忙时开启动画,单个会话完成时带标题通知,
+// 有会话等待交互时提醒;完成与等待时闪烁任务栏
 func (a *app) activityMonitor() {
 	wasBusy := false
-	pending := false
+	busySessions := map[string]string{} // 在忙的会话 id -> 标题
+	pendingSessions := map[string]bool{}
 	for quitting.Load() == 0 {
 		time.Sleep(2 * time.Second)
-		busy, waitInput, ok := fetchActivity(a.port)
+		list, ok := fetchActivities(a.port)
 		if !ok {
 			continue
 		}
-		if busy != wasBusy {
-			wasBusy = busy
-			if busy {
+		nowBusy := map[string]string{}
+		present := map[string]bool{}
+		anyBusy := false
+		for _, s := range list {
+			present[s.ID] = true
+			if s.Busy {
+				nowBusy[s.ID] = s.Title
+				anyBusy = true
+			}
+			if s.Pending && !pendingSessions[s.ID] {
+				pendingSessions[s.ID] = true
+				if getSetting("notify_toast") {
+					toastNotify(fmt.Sprintf("「%s」等待你的操作(审批或提问)", shortTitle(s.Title)))
+					flashWindow(a.hwnd, 5)
+				}
+			} else if !s.Pending {
+				delete(pendingSessions, s.ID)
+			}
+		}
+		// 之前在忙、现在不忙的会话即完成;整个消失的视为删除,静默略过
+		var finished []string
+		for id, title := range busySessions {
+			if _, still := nowBusy[id]; !still && present[id] {
+				finished = append(finished, title)
+			}
+		}
+		busySessions = nowBusy
+		if anyBusy != wasBusy {
+			wasBusy = anyBusy
+			if anyBusy {
 				a.startAnimation()
 			} else {
 				a.stopAnimation()
-				a.onWorkDone()
 			}
 		}
-		if waitInput && !pending {
-			pending = true
-			if getSetting("notify_toast") {
-				toastNotify("有会话等待你的操作(审批或提问)")
-			}
-		} else if !waitInput {
-			pending = false
+		if len(finished) > 0 {
+			a.onSessionsFinished(finished)
 		}
 	}
 }
 
-func (a *app) onWorkDone() {
+func (a *app) onSessionsFinished(titles []string) {
 	if getSetting("notify_toast") {
-		toastNotify("Kimi Code 已完成当前任务")
+		if len(titles) > 3 {
+			toastNotify(fmt.Sprintf("%d 个任务已完成", len(titles)))
+		} else {
+			for _, t := range titles {
+				toastNotify(fmt.Sprintf("「%s」已完成", shortTitle(t)))
+			}
+		}
+		flashWindow(a.hwnd, 5)
 	}
 	if getSetting("notify_sound") {
 		playCompletionSound()
 	}
+}
+
+// shortTitle 截断过长的会话标题用于通知
+func shortTitle(t string) string {
+	t = strings.TrimSpace(t)
+	if t == "" {
+		return "未命名会话"
+	}
+	r := []rune(t)
+	if len(r) > 20 {
+		return string(r[:20]) + "…"
+	}
+	return t
 }
 
 func (a *app) startAnimation() {

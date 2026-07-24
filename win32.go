@@ -37,6 +37,7 @@ var (
 	procCallWindowProcW    = user32.NewProc("CallWindowProcW")
 	procSetProcessDPIAware = user32.NewProc("SetProcessDPIAware")
 	procPostMessageW       = user32.NewProc("PostMessageW")
+	procFlashWindowEx      = user32.NewProc("FlashWindowEx")
 	procGetWindowRect      = user32.NewProc("GetWindowRect")
 	procGetWindowPlacement = user32.NewProc("GetWindowPlacement")
 	procSetWindowPos       = user32.NewProc("SetWindowPos")
@@ -128,6 +129,29 @@ func setForeground(hwnd uintptr) {
 
 func postClose(hwnd uintptr) {
 	_, _, _ = procPostMessageW.Call(hwnd, wmClose, 0, 0)
+}
+
+// ---- 任务栏闪烁 ----
+
+const flashwAll = 0x3 // FLASHW_CAPTION | FLASHW_TRAY
+
+type flashWInfo struct {
+	CbSize  uint32
+	Hwnd    uintptr
+	Flags   uint32
+	Count   uint32
+	Timeout uint32
+}
+
+// flashWindow 闪烁窗口标题栏与任务栏按钮(窗口隐藏时无任务栏按钮可闪,无妨)
+func flashWindow(hwnd uintptr, count uint32) {
+	f := flashWInfo{
+		CbSize: uint32(unsafe.Sizeof(flashWInfo{})),
+		Hwnd:   hwnd,
+		Flags:  flashwAll,
+		Count:  count,
+	}
+	_, _, _ = procFlashWindowEx.Call(uintptr(unsafe.Pointer(&f)))
 }
 
 // ---- 窗口几何 ----
