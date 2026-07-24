@@ -4,11 +4,11 @@
 启动 `kimi web --no-open` 作为隐藏子进程,等待本地服务就绪后,
 用内嵌浏览器(WebView2)窗口打开 Web UI;关闭窗口即停止服务。
 
-端口固定从 58627 起:若该端口已有 kimi web 实例在运行则直接复用,
-否则拉起新实例(被占用时顺延)。同时关闭 pywebview 的隐私模式并
-使用固定数据目录:来源(origin)与 localStorage 稳定,页面才能
-跨启动记住“引导已完成”等状态,否则每次启动都会重新引导。
-启动前还会检测 Kimi Code CLI 是否有新版本,由用户选择是否升级。
+端口固定从 58627 起:先查 kimi 的实例注册表(~/.kimi-code/server/instances/),
+有活着的 kimi web 实例就直接复用,否则拉起新实例(端口被占时顺延)。
+同时关闭 pywebview 的隐私模式并使用固定数据目录:来源(origin)与
+localStorage 稳定,页面才能跨启动记住“引导已完成”等状态。
+启动前还会检测 Kimi Code CLI 更新(每 24 小时最多一次),由用户选择是否升级。
 """
 
 import ctypes
@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from ctypes import wintypes
 
 import webview
 
@@ -29,19 +30,30 @@ APP_TITLE = "Kimi Web"
 PREFERRED_PORT = 58627  # kimi web 默认端口
 PORT_SCAN_LIMIT = 20
 STARTUP_TIMEOUT = 60  # 秒
+CHECK_INTERVAL = 24 * 3600  # 更新检测间隔(秒)
 WEBVIEW_DATA_DIR = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "KimiWeb"
 )
+STATE_FILE = os.path.join(WEBVIEW_DATA_DIR, "state.json")
+SERVER_LOG = os.path.join(WEBVIEW_DATA_DIR, "kimi-web.log")
 
 CREATE_NO_WINDOW = 0x08000000
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+STILL_ACTIVE = 259
+ERROR_ALREADY_EXISTS = 183
 
-NPM_LATEST_URL = "https://registry.npmjs.org/@moonshot-ai/kimi-code/latest"
+NPM_LATEST_URLS = [
+    "https://registry.npmjs.org/@moonshot-ai/kimi-code/latest",
+    "https://registry.npmmirror.com/@moonshot-ai/kimi-code/latest",
+]
 UPGRADE_COMMAND = "irm https://code.kimi.com/kimi-code/install.ps1 | iex"
 
+MB_YESNOCANCEL = 0x3
 MB_YESNO = 0x4
 MB_ICONQUESTION = 0x20
 MB_ICONWARNING = 0x30
 MB_ICONINFORMATION = 0x40
+IDCANCEL = 2
 IDYES = 6
 
 
@@ -63,6 +75,23 @@ def read_token():
             return f.read().strip()
     except OSError:
         return ""
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    try:
+        os.makedirs(WEBVIEW_DATA_DIR, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
 
 
 def parse_version(text):
@@ -95,13 +124,17 @@ def current_version(kimi):
 
 
 def latest_version():
-    """查询 npm registry 上的最新版本;网络失败返回空元组(静默跳过检测)。"""
-    try:
-        with urllib.request.urlopen(NPM_LATEST_URL, timeout=6) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return parse_version(data.get("version", ""))
-    except Exception:
-        return ()
+    """查询最新版本(npm registry,失败走国内镜像);网络失败返回空元组。"""
+    for url in NPM_LATEST_URLS:
+        try:
+            with urllib.request.urlopen(url, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            version = parse_version(data.get("version", ""))
+            if version:
+                return version
+        except Exception:
+            continue
+    return ()
 
 
 def message_box(text, flags):
@@ -109,16 +142,31 @@ def message_box(text, flags):
 
 
 def check_for_updates(kimi):
-    """启动前检测 Kimi Code CLI 更新;有新版本时询问用户是否升级。"""
-    cur = current_version(kimi)
+    """启动前检测 Kimi Code CLI 更新(每 24h 最多一次,离线也计入,
+    避免每次启动都卡在超时上);有新版本时询问:升级 / 本次跳过 / 跳过此版本。"""
+    state = load_state()
+    if time.time() - state.get("last_check", 0) < CHECK_INTERVAL:
+        return
     new = latest_version()
-    if not cur or not new or _norm(new) <= _norm(cur):
+    state["last_check"] = time.time()
+    save_state(state)
+    if not new:
+        return
+    cur = current_version(kimi)
+    if not cur or _norm(new) <= _norm(cur):
+        return
+    if format_version(new) == state.get("skip_version"):
         return
     answer = message_box(
         f"检测到 Kimi Code CLI 新版本 v{format_version(new)}"
-        f"(当前 v{format_version(cur)})。\n\n是否现在升级?",
-        MB_YESNO | MB_ICONQUESTION,
+        f"(当前 v{format_version(cur)})。\n\n"
+        "是:立即升级\n否:本次跳过\n取消:跳过此版本,不再提示",
+        MB_YESNOCANCEL | MB_ICONQUESTION,
     )
+    if answer == IDCANCEL:
+        state["skip_version"] = format_version(new)
+        save_state(state)
+        return
     if answer != IDYES:
         return
     # 官方 Windows 安装/升级脚本;开可见控制台窗口显示下载进度
@@ -126,9 +174,71 @@ def check_for_updates(kimi):
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", UPGRADE_COMMAND]
     )
     if code == 0:
+        state.pop("skip_version", None)
+        save_state(state)
         message_box("升级完成,将以新版本启动。", MB_ICONINFORMATION)
     else:
         message_box("升级未完成(可能被取消或网络失败),将继续使用当前版本。", MB_ICONWARNING)
+
+
+def probe_existing_server(port):
+    """探测指定端口是否是 kimi web:用 /openapi.json 做指纹识别,
+    避免误连占用同一端口的无关服务。"""
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/openapi.json")
+    token = read_token()
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return b'"openapi"' in resp.read(4096)
+    except Exception:
+        return False
+
+
+def pid_alive(pid):
+    """判断进程是否存活(注意:Windows 上不能用 os.kill(pid, 0),那会杀进程)。"""
+    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def find_running_server():
+    """从 kimi 的实例注册表找一个活着的 kimi web 实例(校验 pid 存活 +
+    openapi 指纹),返回其端口;没有则返回 None。"""
+    instances_dir = os.path.expanduser(r"~\.kimi-code\server\instances")
+    try:
+        files = sorted(
+            (
+                os.path.join(instances_dir, f)
+                for f in os.listdir(instances_dir)
+                if f.endswith(".json")
+            ),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            continue
+        pid, host, port = info.get("pid"), info.get("host"), info.get("port")
+        if not isinstance(pid, int) or not isinstance(port, int):
+            continue
+        if host != "127.0.0.1":
+            continue
+        if pid_alive(pid) and probe_existing_server(port):
+            return port
+    return None
 
 
 def pick_port():
@@ -147,7 +257,7 @@ def pick_port():
 
 
 def wait_for_server(port, proc, timeout=STARTUP_TIMEOUT):
-    """轮询直到服务有响应(哪怕 401/404 也说明已起来)。
+    """轮询直到服务就绪(用 openapi 指纹确认,避免误判无关服务)。
     kimi web 在端口被占时会自动 +1,所以探测一小段连续端口。
     返回实际端口,失败返回 None。"""
     deadline = time.time() + timeout
@@ -155,29 +265,19 @@ def wait_for_server(port, proc, timeout=STARTUP_TIMEOUT):
         if proc.poll() is not None:
             return None  # 进程已退出
         for p in range(port, port + 5):
-            try:
-                urllib.request.urlopen(f"http://127.0.0.1:{p}/", timeout=2)
+            if probe_existing_server(p):
                 return p
-            except urllib.error.HTTPError:
-                return p  # 服务在线,只是路由/鉴权返回了错误码
-            except OSError:
-                continue
         time.sleep(0.3)
     return None
 
 
-def probe_existing_server(port):
-    """若首选端口上已有一个 kimi web 实例,直接复用,保持 origin 稳定。
-    用 /openapi.json 做指纹识别,避免误连占用同一端口的无关服务。"""
-    req = urllib.request.Request(f"http://127.0.0.1:{port}/openapi.json")
-    token = read_token()
-    if token:
-        req.add_header("Authorization", f"Bearer {token}")
-    try:
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            return b'"openapi"' in resp.read(4096)
-    except Exception:
+def ensure_single_instance():
+    """单实例保护:已在运行时提示并退出,避免重复窗口和重复更新弹窗。"""
+    ctypes.windll.kernel32.CreateMutexW(None, False, "KimiWebSingleton")
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        message_box("Kimi Web 已在运行,请使用已打开的窗口。", MB_ICONINFORMATION)
         return False
+    return True
 
 
 def patch_webview_settings():
@@ -211,7 +311,7 @@ def start_webview():
 def show_error(message):
     webview.create_window(
         APP_TITLE,
-        html=f"<h3 style='font-family:sans-serif'>{message}</h3>",
+        html=f"<h3 style='font-family:sans-serif'>{message.replace(chr(10), '<br>')}</h3>",
         width=640,
         height=300,
         text_select=True,
@@ -221,6 +321,8 @@ def show_error(message):
 
 def main():
     patch_webview_settings()
+    if not ensure_single_instance():
+        return 0
 
     kimi = find_kimi()
     if not kimi:
@@ -230,22 +332,23 @@ def main():
     check_for_updates(kimi)
 
     proc = None
-    if probe_existing_server(PREFERRED_PORT):
-        # 已有 kimi web 实例在跑,直接挂上去;窗口关闭时不停止它
-        port = PREFERRED_PORT
-    else:
+    log = None
+    port = find_running_server()
+    if port is None:
         port = pick_port()
+        os.makedirs(WEBVIEW_DATA_DIR, exist_ok=True)
+        log = open(SERVER_LOG, "wb")  # 子进程输出留存,便于诊断启动失败
         proc = subprocess.Popen(
             [kimi, "web", "--no-open", "--port", str(port)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
             creationflags=CREATE_NO_WINDOW,
         )
 
         port = wait_for_server(port, proc)
         if port is None:
             proc.terminate()
-            show_error("kimi web 服务启动失败或超时。")
+            show_error(f"kimi web 服务启动失败或超时。\n日志见: {SERVER_LOG}")
             return 1
 
     token = read_token()
@@ -265,6 +368,8 @@ def main():
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        if log is not None:
+            log.close()
 
     window.events.closed += on_closed
     start_webview()
@@ -272,4 +377,11 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # 无控制台窗口,异常不能静默吞掉,弹窗告知
+        import traceback
+
+        message_box(f"发生未处理的错误:\n\n{traceback.format_exc(limit=3)}", MB_ICONWARNING)
+        sys.exit(1)
