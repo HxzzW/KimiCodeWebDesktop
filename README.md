@@ -39,6 +39,21 @@ python -m venv .venv
 
 产物在 `dist/KimiWeb.exe`(单文件、无控制台窗口)。
 
+## 项目结构
+
+```
+app.py              瘦入口(PyInstaller 目标)
+kimiweb/
+  config.py         全局常量与 state.json 存取
+  utils.py          定位 kimi / 读取 token / 资源路径
+  winapi.py         Windows 原语:消息框、pid 存活、单实例锁、WebView2 检测
+  updater.py        CLI 版本检测与升级
+  server.py         kimi web 服务的发现、拉起、就绪等待、kimi doctor
+  webview_ext.py    pywebview 补丁与统一启动参数
+  app.py            KimiWebApp:服务、窗口、看门狗、托盘
+  __main__.py       main() 与全局异常入口
+```
+
 ## 工作原理
 
 - 启动时先检测更新,再查 kimi 的实例注册表 `~/.kimi-code/server/instances/`(校验 pid 存活 + `/openapi.json` 指纹):有活实例直接复用,否则挑一个空闲端口(优先 58627)拉起新实例
