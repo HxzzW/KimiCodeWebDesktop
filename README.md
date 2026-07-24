@@ -10,6 +10,7 @@
 - **复制粘贴可用**:开启了文本选择、右键菜单和 Ctrl+C/V 等快捷键(不开 DevTools)
 - **更新检测**:启动时对比本地 `kimi --version` 与 npm 上的最新版(24 小时内最多查一次,支持国内镜像),发现新版本时询问是否升级,可跳过特定版本
 - **崩溃守护**:服务进程意外退出时弹窗询问是否重启;启动失败自动附 `kimi doctor` 诊断到日志
+- **工作状态动画**:Kimi Code 工作时,窗口标题显示转轮动画、托盘图标带环绕圆点;忙完发 Windows 通知,有会话等待审批/提问时也会提醒(托盘"通知设置"里可分别开关动画/通知/提示音)
 - **单实例保护**:重复双击只会提示"已在运行"
 - **Kimi 图标**:exe 与托盘均内嵌官方图标
 
@@ -61,6 +62,7 @@ kimiweb/
 - WebView2 数据目录固定在 `%LOCALAPPDATA%\KimiWeb`,关闭 pywebview 默认的隐私模式,localStorage 因此能持久保存
 - pywebview 默认只在 debug 模式开启右键菜单和快捷键,这里通过补丁强制开启(`AreDefaultContextMenusEnabled` / `AreBrowserAcceleratorKeysEnabled`)
 - 服务日志与状态文件在 `%LOCALAPPDATA%\KimiWeb\`(`kimi-web.log`、`state.json`),看门狗线程每 2 秒检查一次服务进程存活
+- 工作状态通过 `GET /api/v1/sessions` 轮询(`busy` / `main_turn_active` / `pending_interaction` 字段),忙时切换标题与托盘动画帧,忙完按需发通知(pystray 气球)或提示音(`winsound` 系统音)
 
 ## 说明
 

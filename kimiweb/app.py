@@ -18,6 +18,15 @@ from .config import (
     SERVER_LOG,
     WEBVIEW_DATA_DIR,
 )
+from .notify import (
+    ANIM_INTERVAL,
+    SPINNER_CHARS,
+    fetch_activity,
+    get_setting,
+    make_spinner_frames,
+    play_completion_sound,
+    set_setting,
+)
 from .server import find_running_server, pick_port, run_doctor, wait_for_server
 from .updater import check_for_updates
 from .utils import read_token, resource_path
@@ -34,7 +43,10 @@ class KimiWebApp:
         self.vis_proc = None
         self.window = None
         self.tray = None
+        self.base_icon = None
+        self.spinner_frames = None
         self.quitting = threading.Event()
+        self.animating = threading.Event()
 
     # ---- 服务管理 ----
 
@@ -102,6 +114,80 @@ class KimiWebApp:
                 self.restart_service()
             else:
                 return  # 用户不重启就不再监视
+
+    # ---- 工作状态动画与完成通知 ----
+
+    def activity_monitor(self):
+        """轮询会话工作状态:忙时开启动画,忙完发通知,有会话等待交互时提醒。"""
+        was_busy = False
+        pending = False
+        while not self.quitting.wait(2):
+            result = fetch_activity(self.port, read_token())
+            if result is None:
+                continue
+            busy, wait_input = result
+            if busy != was_busy:
+                was_busy = busy
+                if busy:
+                    self.start_animation()
+                else:
+                    self.stop_animation()
+                    self.on_work_done()
+            if wait_input and not pending:
+                pending = True
+                if get_setting("notify_toast"):
+                    self.notify("有会话等待你的操作(审批或提问)")
+            elif not wait_input:
+                pending = False
+
+    def on_work_done(self):
+        if get_setting("notify_toast"):
+            self.notify("Kimi Code 已完成当前任务")
+        if get_setting("notify_sound"):
+            play_completion_sound()
+
+    def start_animation(self):
+        if get_setting("anim_busy"):
+            self.animating.set()
+
+    def stop_animation(self):
+        self.animating.clear()
+
+    def _animate_loop(self):
+        """常驻动画线程(整个生命周期只此一个,避免重叠写标题)。
+        animating 置位期间驱动标题与托盘帧,清除后恢复静态。"""
+        i = 0
+        was_active = False
+        while not self.quitting.is_set():
+            if self.animating.is_set():
+                try:
+                    self.window.set_title(
+                        f"{APP_TITLE} {SPINNER_CHARS[i % len(SPINNER_CHARS)]} 工作中"
+                    )
+                    if self.tray is not None and self.spinner_frames and i % 2 == 0:
+                        # 托盘变化频率减半,太频繁会像在闪
+                        self.tray.icon = self.spinner_frames[(i // 2) % len(self.spinner_frames)]
+                except Exception:
+                    pass
+                i += 1
+                was_active = True
+                # 注意:不能用 self.animating.wait() 当延时——它处于置位状态
+                # 时会立即返回(动画全速空转);quitting 未置位,可正常阻塞
+                self.quitting.wait(ANIM_INTERVAL)
+            else:
+                if was_active:
+                    was_active = False
+                    i = 0
+                    try:
+                        self.window.set_title(APP_TITLE)
+                        if self.tray is not None and self.base_icon is not None:
+                            self.tray.icon = self.base_icon
+                    except Exception:
+                        pass
+                self.quitting.wait(0.2)
+
+    def _toggle_setting(self, key):
+        set_setting(key, not get_setting(key))
 
     # ---- 窗口 ----
 
@@ -199,7 +285,25 @@ class KimiWebApp:
         threading.Thread(target=func, args=args, kwargs=kwargs, daemon=True).start()
 
     def setup_tray(self):
-        image = Image.open(resource_path("kimi.ico"))
+        self.base_icon = Image.open(resource_path("kimi.ico"))
+        self.spinner_frames = make_spinner_frames(self.base_icon)
+        settings_menu = pystray.Menu(
+            pystray.MenuItem(
+                "工作时动画",
+                lambda icon, item: self._toggle_setting("anim_busy"),
+                checked=lambda item: get_setting("anim_busy"),
+            ),
+            pystray.MenuItem(
+                "完成时通知",
+                lambda icon, item: self._toggle_setting("notify_toast"),
+                checked=lambda item: get_setting("notify_toast"),
+            ),
+            pystray.MenuItem(
+                "完成时提示音",
+                lambda icon, item: self._toggle_setting("notify_sound"),
+                checked=lambda item: get_setting("notify_sound"),
+            ),
+        )
         menu = pystray.Menu(
             pystray.MenuItem("显示窗口", lambda icon, item: self.show_window(), default=True),
             pystray.MenuItem("会话可视化", lambda icon, item: self._run_async(self.toggle_vis)),
@@ -209,15 +313,18 @@ class KimiWebApp:
                 lambda icon, item: self._run_async(check_for_updates, self.kimi, force=True),
             ),
             pystray.MenuItem("重启服务", lambda icon, item: self._run_async(self.restart_service)),
+            pystray.MenuItem("通知设置", settings_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", lambda icon, item: self.quit()),
         )
-        self.tray = pystray.Icon("KimiWeb", image, APP_TITLE, menu)
+        self.tray = pystray.Icon("KimiWeb", self.base_icon, APP_TITLE, menu)
         threading.Thread(target=self.tray.run, daemon=True).start()
 
     def run(self):
         self.create_window()
         self.setup_tray()
         threading.Thread(target=self.watchdog, daemon=True).start()
+        threading.Thread(target=self.activity_monitor, daemon=True).start()
+        threading.Thread(target=self._animate_loop, daemon=True).start()
         start_webview()  # 阻塞,直到窗口真正关闭
         return 0
