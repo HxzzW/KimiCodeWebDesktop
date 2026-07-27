@@ -38,7 +38,7 @@ func main() {
 		return
 	}
 
-	checkForUpdates(kimi, false)
+	checkForUpdates(kimi, false, nil) // 服务尚未启动,升级后自然用新版本
 
 	a := newApp(kimi)
 	if a.startService() == 0 {

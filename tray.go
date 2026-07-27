@@ -37,6 +37,9 @@ func (a *app) setupTray() {
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("退出", "停止服务并退出")
 
+		// 左键单击图标 = 显示窗口(右键仍弹菜单);此时 systray 窗口已创建
+		subclassTrayLeftClick(a.showMainWindow)
+
 		for {
 			select {
 			case <-mShow.ClickedCh:
@@ -46,7 +49,7 @@ func (a *app) setupTray() {
 			case <-mRotate.ClickedCh:
 				go a.rotateToken()
 			case <-mUpdate.ClickedCh:
-				go checkForUpdates(a.kimi, true)
+				go checkForUpdates(a.kimi, true, a.restartService)
 			case <-mRestart.ClickedCh:
 				go a.restartService()
 			case <-cAnim.ClickedCh:

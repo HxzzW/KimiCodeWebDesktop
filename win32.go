@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
@@ -262,6 +263,53 @@ func subclassForCloseHide(hwnd uintptr, quitting *atomic.Int32, onSizeMoveEnd fu
 	nIndex := int32(gwlpWndProc) // 变量才能转 uintptr(常量负值不允许)
 	r, _, _ := procSetWindowLongPtrW.Call(hwnd, uintptr(nIndex), cb)
 	oldWndProc = r
+}
+
+// ---- 托盘左键单击(左键显示窗口,右键维持弹菜单) ----
+
+const (
+	wmSystrayCallback = 0x0401 // systray 库的图标回调消息(WM_USER+1)
+	wmLButtonUp       = 0x0202
+)
+
+var (
+	procFindWindowExW            = user32.NewProc("FindWindowExW")
+	procGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
+)
+
+var oldTrayWndProc uintptr
+
+// subclassTrayLeftClick 子类化 systray 的隐藏窗口:左键点托盘图标交给
+// onLeftClick,其余消息(含右键)走原流程。systray v1.2.2 对左右键都弹菜单
+// 且没有左键回调;其内部细节(类名 SystrayClass、回调消息 WM_USER+1)
+// 该版本已冻结,可安全依赖
+func subclassTrayLeftClick(onLeftClick func()) {
+	class, _ := windows.UTF16PtrFromString("SystrayClass")
+	var hwnd, prev uintptr
+	for {
+		h, _, _ := procFindWindowExW.Call(0, prev, uintptr(unsafe.Pointer(class)), 0)
+		if h == 0 {
+			return // 没找到(理论不会发生):维持原行为
+		}
+		var pid uint32
+		_, _, _ = procGetWindowThreadProcessId.Call(h, uintptr(unsafe.Pointer(&pid)))
+		if pid == uint32(os.Getpid()) { // 同名类可能属于别的进程,只认自己的
+			hwnd = h
+			break
+		}
+		prev = h
+	}
+	cb := syscall.NewCallback(func(hwnd uintptr, msg uint32, wp, lp uintptr) uintptr {
+		if msg == wmSystrayCallback && lp == wmLButtonUp {
+			onLeftClick()
+			return 0
+		}
+		r, _, _ := procCallWindowProcW.Call(oldTrayWndProc, hwnd, uintptr(msg), wp, lp)
+		return r
+	})
+	nIndex := int32(gwlpWndProc)
+	r, _, _ := procSetWindowLongPtrW.Call(hwnd, uintptr(nIndex), cb)
+	oldTrayWndProc = r
 }
 
 // ---- 提示音 ----

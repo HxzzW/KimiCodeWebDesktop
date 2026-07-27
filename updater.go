@@ -60,8 +60,9 @@ func latestVersion() ([3]int, bool) {
 var checkLock sync.Mutex
 
 // checkForUpdates 检测 Kimi Code CLI 更新(每 24h 最多一次,离线也计入;
-// force 跳过间隔与跳过记录并给出反馈)。带可重入保护,防止托盘连点导致弹窗排队
-func checkForUpdates(kimi string, force bool) {
+// force 跳过间隔与跳过记录并给出反馈)。带可重入保护,防止托盘连点导致弹窗排队。
+// restart 非空时(服务已在运行),升级成功后重启服务让新版本生效
+func checkForUpdates(kimi string, force bool, restart func()) {
 	if !checkLock.TryLock() {
 		return
 	}
@@ -119,7 +120,10 @@ func checkForUpdates(kimi string, force bool) {
 	if code == 0 {
 		delete(s, "skip_version")
 		saveState(s)
-		messageBox("升级完成,将以新版本启动。", mbIconInformation)
+		messageBox("升级完成,将以新版本运行。", mbIconInformation)
+		if restart != nil {
+			restart() // 运行中的服务仍是旧版本,重启后生效
+		}
 	} else {
 		messageBox("升级未完成(可能被取消或网络失败),将继续使用当前版本。", mbIconWarning)
 	}
