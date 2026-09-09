@@ -54,6 +54,7 @@ main.go           入口与全局异常处理
 app.go            App:服务、窗口、看门狗、状态监视、动画
 tray.go           系统托盘与菜单
 rc.go             远程操控:rc.json 状态读取、开关切换、复制/打开链接
+qr.go             二维码弹窗(纯 Win32 位图窗口;不开第二个 WebView2,实测会让主窗口输入失效)
 config.go         常量与 state.json 存取
 kimi.go           kimi web 服务的发现、拉起、就绪等待、kimi doctor
 updater.go        CLI 版本检测与升级

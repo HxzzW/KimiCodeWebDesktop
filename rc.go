@@ -6,17 +6,14 @@ package main
 // 中继就绪后 CLI 写 ~/.kimi-code/server/rc.json(进程死后残留,须校验 pid)。
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/getlantern/systray"
-	webview2 "github.com/jchv/go-webview2"
 )
 
 // rcMinVersion 远程操控要求的最低 CLI 版本
@@ -128,41 +125,17 @@ func openRCPage() {
 }
 
 // showRCQR 弹出二维码窗口(CLI 生成的 ~/.kimi-code/rc-qrcode.png,与 kimi rc 终端里的一致),
-// 手机扫码即连;下方附链接文本,便于复制到其他电脑
+// 手机扫码即连;窗口内附链接文本,便于复制到其他电脑
 func showRCQR() {
 	st, ok := readRCState()
 	if !ok {
 		messageBox("远程操控当前未开启。\n可在托盘「远程操控 → 启用远程操控」打开(需 CLI ≥0.42 与付费会员)。", mbIconInformation)
 		return
 	}
-	png, err := os.ReadFile(filepath.Join(os.Getenv("USERPROFILE"), `.kimi-code\rc-qrcode.png`))
-	if err != nil {
+	pngPath := filepath.Join(os.Getenv("USERPROFILE"), `.kimi-code\rc-qrcode.png`)
+	if _, err := os.Stat(pngPath); err != nil {
 		messageBox("未找到二维码文件,请直接使用链接:\n"+st.URL, mbIconInformation)
 		return
 	}
-	escaped := strings.ReplaceAll(st.URL, "&", "&amp;")
-	html := `<html><body style="margin:0;display:flex;flex-direction:column;align-items:center;` +
-		`justify-content:center;height:100vh;font-family:sans-serif;background:#fff;user-select:text">` +
-		`<img style="width:360px;height:360px;image-rendering:pixelated" src="data:image/png;base64,` +
-		base64.StdEncoding.EncodeToString(png) + `"/>` +
-		`<div style="margin-top:18px;color:#444;font-size:16px">手机扫码,登录同一 Kimi 账号即可控制本机</div>` +
-		`<div style="margin-top:12px;color:#999;font-size:12px;max-width:88%;word-break:break-all">` + escaped + `</div>` +
-		`</body></html>`
-	w := webview2.NewWithOptions(webview2.WebViewOptions{
-		DataPath: webviewDataDir,
-		WindowOptions: webview2.WindowOptions{
-			Title:  "远程操控 · 扫码连接",
-			Width:  480,
-			Height: 600,
-			Center: true,
-			IconId: 1,
-		},
-	})
-	if w == nil {
-		messageBox("二维码窗口创建失败,请直接使用链接:\n"+st.URL, mbIconInformation)
-		return
-	}
-	defer w.Destroy()
-	w.SetHtml(html)
-	w.Run()
+	qrShowQRCode(pngPath, st.URL)
 }
