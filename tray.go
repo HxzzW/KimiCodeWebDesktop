@@ -27,6 +27,11 @@ func (a *app) setupTray() {
 
 		mShow := systray.AddMenuItem("显示窗口", "显示主窗口")
 		mVis := systray.AddMenuItem("会话可视化", "启动/停止 kimi vis")
+		mRC := systray.AddMenuItem("远程操控", "从手机/其他设备控制本机(需 CLI ≥0.42 与付费会员)")
+		cRCEnable := mRC.AddSubMenuItemCheckbox("启用远程操控", "重启服务后生效", getSetting("rc_enabled"))
+		mRCQR := mRC.AddSubMenuItem("显示二维码", "弹出二维码窗口,手机扫码连接")
+		mRCCopy := mRC.AddSubMenuItem("复制远程链接", "复制 Remote Control 访问链接")
+		mRCOpen := mRC.AddSubMenuItem("打开远程页面", "在浏览器中打开 Remote Control 页面")
 		mRotate := systray.AddMenuItem("轮换 Token", "轮换 web UI 的 bearer token")
 		mUpdate := systray.AddMenuItem("检查更新", "检测 Kimi Code CLI 新版本")
 		mRestart := systray.AddMenuItem("重启服务", "重启 kimi web 服务")
@@ -46,6 +51,14 @@ func (a *app) setupTray() {
 				a.showMainWindow()
 			case <-mVis.ClickedCh:
 				go a.toggleVis()
+			case <-cRCEnable.ClickedCh:
+				go a.toggleRC(cRCEnable)
+			case <-mRCQR.ClickedCh:
+				go showRCQR()
+			case <-mRCCopy.ClickedCh:
+				go copyRCLink()
+			case <-mRCOpen.ClickedCh:
+				go openRCPage()
 			case <-mRotate.ClickedCh:
 				go a.rotateToken()
 			case <-mUpdate.ClickedCh:

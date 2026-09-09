@@ -156,7 +156,15 @@ func spawnService(kimi string, port int, logFile **os.File) (*exec.Cmd, error) {
 		}
 		*logFile = f
 	}
-	cmd := exec.Command(kimi, "web", "--no-open", "--port", strconv.Itoa(port))
+	args := []string{"web", "--no-open", "--port", strconv.Itoa(port)}
+	if getSetting("rc_enabled") {
+		// 远程操控(CLI ≥0.42 实验功能):本地服务照常,另挂中继通道
+		args = append(args, "--rc")
+	}
+	cmd := exec.Command(kimi, args...)
+	if getSetting("rc_enabled") {
+		cmd.Env = append(os.Environ(), "KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1")
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	cmd.Stdout = *logFile
 	cmd.Stderr = *logFile

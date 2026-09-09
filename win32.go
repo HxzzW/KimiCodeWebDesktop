@@ -46,6 +46,14 @@ var (
 	procGetSystemMetrics   = user32.NewProc("GetSystemMetrics")
 	procCreateMutexW       = kernel32.NewProc("CreateMutexW")
 	procPlaySoundW         = winmm.NewProc("PlaySoundW")
+	procOpenClipboard      = user32.NewProc("OpenClipboard")
+	procEmptyClipboard     = user32.NewProc("EmptyClipboard")
+	procCloseClipboard     = user32.NewProc("CloseClipboard")
+	procSetClipboardData   = user32.NewProc("SetClipboardData")
+	procGlobalAlloc        = kernel32.NewProc("GlobalAlloc")
+	procGlobalLock         = kernel32.NewProc("GlobalLock")
+	procGlobalUnlock       = kernel32.NewProc("GlobalUnlock")
+	procRtlMoveMemory      = kernel32.NewProc("RtlMoveMemory")
 )
 
 func messageBox(text string, flags uintptr) int {
@@ -310,6 +318,39 @@ func subclassTrayLeftClick(onLeftClick func()) {
 	nIndex := int32(gwlpWndProc)
 	r, _, _ := procSetWindowLongPtrW.Call(hwnd, uintptr(nIndex), cb)
 	oldTrayWndProc = r
+}
+
+// ---- 剪贴板 ----
+
+// copyToClipboard 复制文本到系统剪贴板(CF_UNICODETEXT)
+func copyToClipboard(text string) bool {
+	const (
+		cfUnicodeText = 13
+		gmemMoveable  = 0x0002
+	)
+	u16, err := windows.UTF16FromString(text)
+	if err != nil {
+		return false
+	}
+	r, _, _ := procOpenClipboard.Call(0)
+	if r == 0 {
+		return false
+	}
+	defer procCloseClipboard.Call()
+	_, _, _ = procEmptyClipboard.Call()
+	size := uintptr(len(u16) * 2)
+	h, _, _ := procGlobalAlloc.Call(gmemMoveable, size)
+	if h == 0 {
+		return false
+	}
+	p, _, _ := procGlobalLock.Call(h)
+	if p == 0 {
+		return false
+	}
+	_, _, _ = procRtlMoveMemory.Call(p, uintptr(unsafe.Pointer(&u16[0])), size)
+	_, _, _ = procGlobalUnlock.Call(h)
+	r, _, _ = procSetClipboardData.Call(cfUnicodeText, h) // 成功后句柄归系统所有
+	return r != 0
 }
 
 // ---- 提示音 ----

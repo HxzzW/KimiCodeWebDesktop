@@ -7,7 +7,8 @@ Go 实现,单文件约 9 MB、无控制台窗口、无 CGO/运行时依赖(WebVi
 ## 功能
 
 - **一键启动**:自动拉起隐藏的 `kimi web --no-open` 子进程(或复用已在运行的实例),服务就绪后打开桌面窗口
-- **系统托盘**:关闭窗口只是隐藏到托盘,服务继续运行;托盘菜单提供 显示窗口 / 会话可视化(`kimi vis`) / 轮换 Token / 检查更新 / 重启服务 / 通知设置 / 退出
+- **系统托盘**:关闭窗口只是隐藏到托盘,服务继续运行;托盘菜单提供 显示窗口 / 会话可视化(`kimi vis`) / 远程操控 / 轮换 Token / 检查更新 / 重启服务 / 通知设置 / 退出
+- **远程操控**:支持 Kimi Code CLI 0.42 的 Remote Control(实验功能,需付费会员):托盘「远程操控 → 启用远程操控」后服务以 `--rc` 重启;「显示二维码」弹窗供手机扫码,或复制链接到其他设备,登录同一 Kimi 账号即可远程查看与控制本机会话
 - **状态记忆**:固定端口 + 持久化 WebView2 数据目录,页面引导、登录状态等 localStorage 内容跨启动保留
 - **复制粘贴可用**:WebView2 默认开启文本选择、右键菜单与快捷键
 - **更新检测**:启动时对比本地 `kimi --version` 与 npm 上的最新版(24 小时内最多查一次,支持国内镜像),发现新版本时询问是否升级,可跳过特定版本
@@ -52,6 +53,7 @@ CGO_ENABLED=0 go build -ldflags="-s -w -H windowsgui" -o kimiweb.exe .
 main.go           入口与全局异常处理
 app.go            App:服务、窗口、看门狗、状态监视、动画
 tray.go           系统托盘与菜单
+rc.go             远程操控:rc.json 状态读取、开关切换、复制/打开链接
 config.go         常量与 state.json 存取
 kimi.go           kimi web 服务的发现、拉起、就绪等待、kimi doctor
 updater.go        CLI 版本检测与升级
@@ -71,6 +73,7 @@ versioninfo.json  exe 版本信息(goversioninfo)
 - 服务日志与状态文件在 `%LOCALAPPDATA%\KimiWeb\`(`kimi-web.log`、`state.json`),看门狗每 2 秒检查一次服务进程存活
 - 工作状态通过 `GET /api/v1/sessions` 轮询(`busy` / `main_turn_active` / `pending_interaction` 字段),忙时切换标题与托盘动画帧,忙完按需发 Windows toast 通知或提示音(系统音)
 - 关窗隐藏通过对窗口过程做子类化拦截 `WM_CLOSE` 实现;托盘"退出"才真正停止服务并关闭
+- 远程操控开启时,服务以 `kimi web --rc` 启动(自动附带 `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1`),本地 Web UI 与 token 鉴权不受影响;访问链接读自 `~/.kimi-code/server/rc.json`(进程死后该文件会残留,读取时校验 pid 存活)
 
 ## 说明
 

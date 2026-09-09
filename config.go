@@ -55,9 +55,10 @@ func saveState(s state) {
 }
 
 var settingDefaults = map[string]bool{
-	"anim_busy":    true, // 工作时标题与托盘动画
-	"notify_toast": true, // 完成时 Windows 通知
+	"anim_busy":    true,  // 工作时标题与托盘动画
+	"notify_toast": true,  // 完成时 Windows 通知
 	"notify_sound": false, // 完成时提示音
+	"rc_enabled":   false, // 远程操控(kimi web --rc,需 CLI ≥0.42 与付费会员)
 }
 
 func getSetting(key string) bool {
